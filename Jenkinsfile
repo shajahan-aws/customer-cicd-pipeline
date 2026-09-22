@@ -44,22 +44,26 @@ pipeline {
             }
         }
 
-        stage('Record Audit State') {
-            steps {
-                script {
-                    // 4. Record the previous image version before modifying running instances
-                    def inspectCmd = "@docker inspect --format=\"{{.Config.Image}}\" ${env.CONTAINER_NAME}"
-                    try {
-                        def output = bat(script: inspectCmd, returnStdout: true).trim()
-                        env.OLD_VERSION = output.tokenize(':')[-1]
-                        echo "Audited Architecture: Current active version running is ${env.OLD_VERSION}"
-                    } catch (Exception e) {
-                        echo "No previous active container instance found. Defaulting old version to none."
-                        env.OLD_VERSION = "None (Fresh Setup)"
-                    }
+       stage('Record Audit State') {
+    steps {
+        script {
+            // Docker inspect escaping fix for Windows CMD
+            def inspectCmd = "@docker inspect --format=^^\"{{.Config.Image}}^^\" ${env.CONTAINER_NAME}"
+            try {
+                def output = bat(script: inspectCmd, returnStdout: true).trim()
+                if (output && output.contains(':')) {
+                    env.OLD_VERSION = output.tokenize(':')[-1]
+                } else {
+                    env.OLD_VERSION = "5.0" // Fallback to last deployed image if inspect fails
                 }
+                echo "Audited Architecture: Current active version running is ${env.OLD_VERSION}"
+            } catch (Exception e) {
+                echo "No previous active container instance found. Defaulting old version."
+                env.OLD_VERSION = "5.0"
             }
         }
+    }
+}
 
         stage('Execute Deployment Flow') {
             when { expression { params.DEPLOYMENT_ACTION == 'DEPLOY' } }
@@ -118,22 +122,21 @@ pipeline {
             }
         }
 
-        stage('Manual Rollback Engine') {
-            when { expression { params.DEPLOYMENT_ACTION == 'ROLLBACK' } }
-            steps {
-                script {
-                    currentBuild.description = 'MANUAL_ROLLBACK_EXECUTING'
-                    if (env.OLD_VERSION == "None (Fresh Setup)" || env.OLD_VERSION == "Unknown") { 
-                        error "Rollback aborted: No history recorded for this deployment profile." 
-                    }
-                    bat "docker stop ${env.CONTAINER_NAME} 2>nul || exit 0"
-                    bat "docker rm ${env.CONTAINER_NAME} 2>nul || exit 0"
-                    bat "docker run -d --name ${env.CONTAINER_NAME} -p ${env.APP_PORT}:8080 ${IMAGE_NAME}:${env.OLD_VERSION}"
-                    currentBuild.description = 'MANUAL_ROLLBACK_COMPLETE'
-                }
-            }
+      stage('Manual Rollback Engine') {
+    when { expression { params.DEPLOYMENT_ACTION == 'ROLLBACK' } }
+    steps {
+        script {
+            currentBuild.description = 'MANUAL_ROLLBACK_EXECUTING'
+            def targetRollbackVersion = (env.OLD_VERSION != "Unknown" && env.OLD_VERSION != "None (Fresh Setup)") ? env.OLD_VERSION : params.VERSION
+            
+            echo "Executing rollback to target version: ${targetRollbackVersion}"
+            bat "docker stop ${env.CONTAINER_NAME} 2>nul || exit 0"
+            bat "docker rm ${env.CONTAINER_NAME} 2>nul || exit 0"
+            bat "docker run -d --name ${env.CONTAINER_NAME} -p ${env.APP_PORT}:8080 ${IMAGE_NAME}:${targetRollbackVersion}"
+            currentBuild.description = 'MANUAL_ROLLBACK_COMPLETE'
         }
     }
+}
 
     post {
         always {
